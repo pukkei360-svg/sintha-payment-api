@@ -1,7 +1,2 @@
 {
-  "functions": {
-    "api/**/*.js": {
-      "runtime": "@vercel/edge@1.0.0"
-    }
-  }
 }
