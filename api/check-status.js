@@ -1,52 +1,48 @@
 export const config = { runtime: 'edge' };
 import { createRemoteJWKSet, jwtVerify } from "jose";
-
 const JWKS = createRemoteJWKSet(new URL("https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com"));
-
 async function verifyFirebaseToken(token, projectId) {
-  const { payload } = await jwtVerify(token, JWKS, {
-    issuer: `https://securetoken.google.com/${projectId}`,
-    audience: projectId,
-  });
+  const { payload } = await jwtVerify(token, JWKS, { issuer: `https://securetoken.google.com/${projectId}`, audience: projectId });
   return payload;
 }
-
 function json(data, status = 200) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "POST, OPTIONS", "Access-Control-Allow-Headers": "Content-Type, Authorization" },
-  });
+  return new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "POST, OPTIONS", "Access-Control-Allow-Headers": "Content-Type, Authorization" } });
 }
-
+function base64Encode(str) {
+  if (typeof btoa === 'function') return btoa(str);
+  return Buffer.from(str).toString('base64');
+}
 export default async function handler(request) {
   if (request.method === "OPTIONS") return new Response(null, { status: 200, headers: { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "POST, OPTIONS", "Access-Control-Allow-Headers": "Content-Type, Authorization" } });
   if (request.method !== "POST") return json({ error: "method_not_allowed" }, 405);
-
   const projectId = process.env.FIREBASE_PROJECT_ID || "sintha-2999b";
   const keyId = process.env.RAZORPAY_KEY_ID;
   const keySecret = process.env.RAZORPAY_KEY_SECRET;
   if (!keyId || !keySecret) return json({ error: "server_not_configured" }, 500);
-
   let uid;
   try {
     const auth = request.headers.get("Authorization") || "";
     const match = auth.match(/^Bearer (.+)$/);
-    if (!match) throw new Error("missing_token");
+    if (!match) return json({ error: "unauthenticated" }, 401);
     const payload = await verifyFirebaseToken(match[1], projectId);
     uid = payload.sub;
-  } catch (e) { return json({ error: "unauthenticated" }, 401); }
-
+  } catch (e) { return json({ error: "unauthenticated", detail: e.message }, 401); }
   try {
-    const { orderId } = await request.json();
+    const body = await request.text();
+    let orderId;
+    try { orderId = JSON.parse(body).orderId; } catch (e) { return json({ error: "invalid_json" }, 400); }
     if (!orderId) return json({ error: "missing_order_id" }, 400);
-    const authB64 = btoa(`${keyId}:${keySecret}`);
-    const res = await fetch(`https://api.razorpay.com/v1/orders/${orderId}/payments`, {
-      method: "GET",
-      headers: { Authorization: `Basic ${authB64}` },
-    });
-    const payments = await res.json();
-    if (!res.ok) throw new Error(payments?.error?.description || `Razorpay error ${res.status}`);
+    const authB64 = base64Encode(`${keyId}:${keySecret}`);
+    const res = await fetch(`https://api.razorpay.com/v1/orders/${orderId}/payments`, { method: "GET", headers: { Authorization: `Basic ${authB64}` } });
+    const paymentsText = await res.text();
+    if (!res.ok) {
+      let errMsg = `Razorpay error ${res.status}`;
+      try { errMsg = JSON.parse(paymentsText)?.error?.description || errMsg; } catch (_) {}
+      return json({ error: errMsg }, 500);
+    }
+    let payments;
+    try { payments = JSON.parse(paymentsText); } catch (e) { return json({ error: "razorpay_invalid_response" }, 500); }
     const captured = (payments.items || []).find((p) => p.status === "captured");
     return json({ paymentId: captured ? captured.id : null });
-  } catch (e) { console.error(e); return json({ error: e.message || "internal_error" }, 500); }
+  } catch (e) { console.error("Server error:", e); return json({ error: e.message || "internal_error" }, 500); }
 }
