@@ -44,10 +44,12 @@ export default async function handler(request) {
     if (!res.ok) {
       let errMsg = `Razorpay error ${res.status}`;
       try { errMsg = JSON.parse(orderText)?.error?.description || errMsg; } catch (_) {}
-      return json({ error: errMsg }, 500);
+      return json({ error: errMsg, razorpayStatus: res.status, keyId }, 500);
     }
     let order;
     try { order = JSON.parse(orderText); } catch (e) { return json({ error: "razorpay_invalid_response" }, 500); }
-    return json({ orderId: order.id });
+    // Return keyId so the client can verify it matches its hardcoded key.
+    // This is safe: key_id is PUBLIC by design (only key_secret is secret).
+    return json({ orderId: order.id, keyId });
   } catch (e) { console.error("Server error:", e); return json({ error: e.message || "internal_error" }, 500); }
 }
