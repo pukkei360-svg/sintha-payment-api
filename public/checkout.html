@@ -7,18 +7,20 @@
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; min-height: 100vh; display: flex; align-items: center; justify-content: center; }
-    #status { color: #0A2447; font-size: 16px; text-align: center; padding: 20px; }
-    .spinner { width: 40px; height: 40px; border: 3px solid #0A2447; border-top-color: transparent; border-radius: 50%; animation: spin 1s linear infinite; margin: 0 auto 16px; }
+    #container { text-align: center; padding: 20px; max-width: 400px; }
+    #status { color: #0A2447; font-size: 16px; margin-top: 16px; }
+    .spinner { width: 40px; height: 40px; border: 3px solid #0A2447; border-top-color: transparent; border-radius: 50%; animation: spin 1s linear infinite; margin: 0 auto; }
     @keyframes spin { to { transform: rotate(360deg); } }
     .err { color: #c62828; }
+    #debug { color: #999; font-size: 11px; margin-top: 16px; word-break: break-all; text-align: left; max-height: 200px; overflow-y: auto; }
   </style>
 </head>
 <body>
-  <div>
+  <div id="container">
     <div id="spinner" class="spinner"></div>
     <div id="status">Opening payment...</div>
+    <div id="debug"></div>
   </div>
-  <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
   <script>
     (function() {
       var params = new URLSearchParams(window.location.search);
@@ -30,73 +32,111 @@
       var contact = params.get('prefill_contact') || '';
       var email = params.get('prefill_email') || '';
 
+      function log(msg) {
+        try {
+          var el = document.getElementById('debug');
+          if (el) el.textContent = msg + '\n' + el.textContent;
+          if (window.Android && window.Android.onLog) window.Android.onLog(msg);
+        } catch(e) {}
+      }
+
       function setStatus(msg, isError) {
         var el = document.getElementById('status');
         el.textContent = msg;
         if (isError) el.className = 'err';
-        if (!isError) {
-          var s = document.getElementById('spinner');
-          if (s) s.style.display = 'none';
-        }
+        var s = document.getElementById('spinner');
+        if (s && !isError) s.style.display = 'none';
       }
 
+      log('Params: key=' + keyId + ' order=' + orderId + ' amount=' + amount);
+
       if (!keyId || !orderId || !amount) {
-        setStatus('Missing payment parameters. Please close and try again.', true);
+        setStatus('Missing payment parameters.', true);
+        log('ERROR: missing params');
         if (window.Android) window.Android.onPaymentError('0', 'Missing payment parameters');
         return;
       }
 
-      if (typeof Razorpay === 'undefined') {
-        setStatus('Payment SDK failed to load. Check your internet connection.', true);
-        if (window.Android) window.Android.onPaymentError('0', 'Checkout SDK failed to load');
-        return;
-      }
+      // Load checkout.js dynamically (same as sinthadeploy.vercel.app does)
+      log('Loading checkout.js...');
+      var script = document.createElement('script');
+      script.src = 'https://checkout.razorpay.com/v1/checkout.js';
+      script.async = true;
 
-      var options = {
-        key: keyId,
-        order_id: orderId,
-        amount: amount,
-        currency: 'INR',
-        name: name,
-        description: description,
-        theme: { color: '#0A2447' },
-        method: { upi: true, card: true, netbanking: true, wallet: true },
-        handler: function(response) {
-          setStatus('Payment successful! Please wait...', false);
-          if (window.Android) {
-            window.Android.onPaymentSuccess(
-              response.razorpay_payment_id,
-              response.razorpay_order_id,
-              response.razorpay_signature || ''
-            );
+      script.onerror = function() {
+        setStatus('Payment SDK failed to load. Check internet.', true);
+        log('ERROR: checkout.js failed to load');
+        if (window.Android) window.Android.onPaymentError('0', 'Checkout SDK failed to load');
+      };
+
+      script.onload = function() {
+        log('checkout.js loaded. Razorpay type: ' + typeof Razorpay);
+        if (typeof Razorpay === 'undefined') {
+          setStatus('Payment SDK not available.', true);
+          log('ERROR: Razorpay is undefined');
+          if (window.Android) window.Android.onPaymentError('0', 'Razorpay undefined');
+          return;
+        }
+
+        try {
+          var options = {
+            key: keyId,
+            order_id: orderId,
+            amount: amount,
+            currency: 'INR',
+            name: name,
+            description: description,
+            theme: { color: '#0A2447' },
+            method: { upi: true, card: true, netbanking: true, wallet: true },
+            redirect: true,
+            handler: function(response) {
+              log('Handler called: pid=' + response.razorpay_payment_id);
+              setStatus('Payment successful! Returning...', false);
+              if (window.Android) {
+                window.Android.onPaymentSuccess(
+                  response.razorpay_payment_id,
+                  response.razorpay_order_id,
+                  response.razorpay_signature || ''
+                );
+              }
+            },
+            modal: {
+              ondismiss: function() {
+                log('Modal dismissed');
+                if (window.Android) window.Android.onDismiss();
+              }
+            }
+          };
+
+          if (contact || email) {
+            options.prefill = {};
+            if (contact) options.prefill.contact = contact;
+            if (email) options.prefill.email = email;
           }
-        },
-        modal: {
-          ondismiss: function() {
-            if (window.Android) window.Android.onDismiss();
-          }
+
+          log('Creating Razorpay instance...');
+          var rzp = new Razorpay(options);
+
+          rzp.on('payment.failed', function(response) {
+            var desc = (response && response.error && response.error.description) || 'Payment failed';
+            var code = (response && response.error && response.error.code) || '0';
+            log('payment.failed: code=' + code + ' desc=' + desc);
+            setStatus('Payment failed: ' + desc, true);
+            if (window.Android) window.Android.onPaymentError(code, desc);
+          });
+
+          log('Opening Razorpay checkout...');
+          rzp.open();
+          log('rzp.open() returned');
+        } catch (e) {
+          log('EXCEPTION: ' + (e.message || e));
+          setStatus('Error: ' + (e.message || 'Unknown error'), true);
+          if (window.Android) window.Android.onPaymentError('0', e.message || 'Checkout error');
         }
       };
 
-      if (contact || email) {
-        options.prefill = {};
-        if (contact) options.prefill.contact = contact;
-        if (email) options.prefill.email = email;
-      }
-
-      try {
-        var rzp = new Razorpay(options);
-        rzp.on('payment.failed', function(response) {
-          var desc = (response && response.error && response.error.description) || 'Payment failed';
-          var code = (response && response.error && response.error.code) || '0';
-          setStatus('Payment failed: ' + desc, true);
-          if (window.Android) window.Android.onPaymentError(code, desc);
-        });
-        rzp.open();
-      } catch (e) {
-        setStatus('Error: ' + (e.message || 'Unknown error'), true);
-        if (window.Android) window.Android.onPaymentError('0', e.message || 'Checkout error');
-      }
+      document.head.appendChild(script);
+      log('Script tag appended to head');
     })();
   </script>
 </body>
